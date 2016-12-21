@@ -11,7 +11,7 @@ def log(sql, args=()):
     logging.info('SQL: %s' % sql)
 
 @asyncio.coroutine
-def create_pool(loop, **kw):
+def create_pool(loop=None, **kw):
     logging.info('create database connection pool...')
     global __pool
     __pool = yield from aiomysql.create_pool(
@@ -39,14 +39,14 @@ def select(sql, args, size=None):
     log(sql, args)
     global __pool
     with (yield from __pool) as conn:
-        with (yield from conn.cursor(aiomysql.DictCursor)) as cur:
-            yield from cur.execute(sql.replace('?', '%s'), args or ())
-            if size:
-                rs = yield from cur.fetchmany(size)
-            else:
-                rs = yield from cur.fetchall()
+        cur = yield from conn.cursor()
+        yield from cur.execute(sql.replace('?', '%s'), args or ())
+        if size:
+            rs = yield from cur.fetchmany(size)
+        else:
+            rs = yield from cur.fetchall()
         logging.info('rows returned: %s' % len(rs))
-        yield from destory_pool()
+        yield from cur.close()
         return rs
 
 @asyncio.coroutine
@@ -56,16 +56,16 @@ def execute(sql, args, autocommit=True):
         if not autocommit:
             yield from conn.begin()
         try:
-            with (yield from conn.cursor(aiomysql.DictCursor)) as cur:
-                yield from cur.execute(sql.replace('?', '%s'), args)
-                affected = cur.rowcount
+            cur = yield from conn.cursor()
+            yield from cur.execute(sql.replace('?', '%s'), args)
+            affected = cur.rowcount
             if not autocommit:
                 yield from conn.commit()
         except BaseException as e:
             if not autocommit:
                 yield from conn.rollback()
             raise
-        yield from destory_pool()
+        yield from cur.close()
         return affected
 
 def create_args_string(num):
@@ -87,7 +87,7 @@ class Field(object):
 
 class StringField(Field):
 
-    def __init__(self, name=None, primary_key=False, default=None, ddl='varchar(100)'):
+    def __init__(self, name=None, primary_key=False, default='', ddl='varchar(100)'):
         super().__init__(name, ddl, primary_key, default)
 
 class BooleanField(Field):
@@ -107,7 +107,7 @@ class FloatField(Field):
 
 class TextField(Field):
 
-    def __init__(self, name=None, default=None):
+    def __init__(self, name=None, default=''):
         super().__init__(name, 'text', False, default)
 
 class ModelMetaclass(type):
@@ -199,7 +199,7 @@ class Model(dict, metaclass=ModelMetaclass):
             else:
                 raise ValueError('Invalid limit value: %s' % str(limit))
         rs = yield from select(' '.join(sql), args)
-        return [cls(**r) for r in rs]
+        return [r for r in rs]
 
     @classmethod
     @asyncio.coroutine
@@ -245,24 +245,4 @@ class Model(dict, metaclass=ModelMetaclass):
         rows = yield from execute(self.__delete__, args)
         if rows != 1:
             logging.warn('failed to remove by primary key: affected rows: %s' % rows)
-
-class User(Model):
-    __table__ = 'user'
-    id = IntegerField(primary_key=True)
-    name = StringField()
-
-@asyncio.coroutine
-def test(loop):
-    try:
-        yield from create_pool(loop=loop, host='127.0.0.1', port=3306, user='root', password='root', db='test')
-    except BaseException as e:
-        print('create pool failed!')
-    user = User()
-    rs = user.findAll()
-    for k, v in user.findAll():
-        print(v)
-
-loop = asyncio.get_event_loop()
-loop.run_until_complete(test(loop))
-loop.close()
 
